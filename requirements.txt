@@ -9,6 +9,6 @@ opencv-python-headless==4.9.0.80
 
 torch==2.1.2
 torchvision==0.16.2
-facenet-pytorch==2.6.0
+facenet-pytorch==2.5.3
 
 supabase==2.27.0
