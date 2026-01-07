@@ -9,6 +9,13 @@ from datetime import datetime, timezone
 from api.supabase_client import get_supabase
 from api.schemas import RecognizeResponse
 from api.embedding import get_embedding_from_image_bytes
+from api.routes import employees, faces, logs
+from api.routes.cameras import router as cameras_router
+
+app.include_router(cameras_router)
+app.include_router(employees.router)
+app.include_router(faces.router)
+app.include_router(logs.router)
 
 load_dotenv()
 
