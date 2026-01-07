@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+dataset/
+faiss_index/
+models/
+*.npy
+*.pt
+*.pth
+*.onnx
+.DS_Store
