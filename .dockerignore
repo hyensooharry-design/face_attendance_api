@@ -4,7 +4,6 @@ __pycache__/
 data/
 dataset/
 faiss_index/
-models/
 *.npy
 *.pt
 *.pth
