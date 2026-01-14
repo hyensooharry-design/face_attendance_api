@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 
 from api.supabase_client import get_supabase
 from api.embedding import get_embedding_from_image_bytes
+import traceback
 
 router = APIRouter(tags=["recognize"])
 
@@ -170,93 +171,105 @@ async def recognize(
     camera_id: str = Form(...),
     threshold: float = Form(0.35),
 ) -> Dict[str, Any]:
-    # ✅ 0) event_type normalize (DB enum 불일치 방지)
-    event_type = _normalize_event_type(event_type)
-
-    # 1) camera FK 보장
-    camera_id = (camera_id or "").strip()
-    if not camera_id:
-        raise HTTPException(status_code=400, detail="camera_id is required")
-    _ensure_camera_exists(camera_id)
-
-    # 2) 이미지 -> 임베딩
-    img_bytes = await file.read()
-    if not img_bytes:
-        raise HTTPException(status_code=400, detail="empty file")
-
     try:
-        query_emb = get_embedding_from_image_bytes(img_bytes).astype(np.float32)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"msg": "embedding failed", "error": repr(e)})
+        # ✅ 0) event_type normalize (DB enum 불일치 방지)
+        event_type = _normalize_event_type(event_type)
 
-    # 3) DB 임베딩 fetch -> best match
-    rows = _fetch_all_embeddings(limit=2000)
-    if not rows:
-        # 얼굴 등록 자체가 없는 상태
+        # 1) camera FK 보장
+        camera_id = (camera_id or "").strip()
+        if not camera_id:
+            raise HTTPException(status_code=400, detail="camera_id is required")
+        _ensure_camera_exists(camera_id)
+
+        # 2) 이미지 -> 임베딩
+        img_bytes = await file.read()
+        if not img_bytes:
+            raise HTTPException(status_code=400, detail="empty file")
+
+        try:
+            query_emb = get_embedding_from_image_bytes(img_bytes).astype(np.float32)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"msg": "embedding failed", "error": repr(e)})
+
+        # 3) DB 임베딩 fetch -> best match
+        rows = _fetch_all_embeddings(limit=2000)
+        if not rows:
+            log_row = _insert_attendance_log(
+                event_type=event_type,
+                camera_id=camera_id,
+                recognized=False,
+                similarity=None,
+                employee_id=None,
+            )
+            return {
+                "recognized": False,
+                "similarity": None,
+                "employee_id": None,
+                "name": None,
+                "employee_code": None,
+                "camera_id": camera_id,
+                "event_type": event_type,
+                "log_id": log_row.get("log_id"),
+                "event_time": log_row.get("event_time"),
+                "created_at": log_row.get("created_at"),
+                "message": "No enrolled faces found in DB.",
+            }
+
+        best_emp_id: Optional[int] = None
+        best_sim: float = -1.0
+
+        for r in rows:
+            emb = _parse_pgvector(r.get("embedding"))
+            if emb is None:
+                continue
+            if emb.shape[0] != query_emb.shape[0]:
+                continue
+
+            sim = _cosine_similarity(query_emb, emb)
+            if sim > best_sim:
+                best_sim = sim
+                best_emp_id = r.get("employee_id")
+
+        recognized = bool(best_emp_id is not None and best_sim >= float(threshold))
+
+        emp_brief: Dict[str, Any] = {}
+        if recognized and best_emp_id is not None:
+            emp_brief = _fetch_employee_brief(int(best_emp_id))
+            if emp_brief.get("is_active") is False:
+                recognized = False
+
         log_row = _insert_attendance_log(
             event_type=event_type,
             camera_id=camera_id,
-            recognized=False,
-            similarity=None,
-            employee_id=None,
+            recognized=recognized,
+            similarity=float(best_sim) if best_sim >= -0.5 else None,
+            employee_id=int(best_emp_id) if recognized and best_emp_id is not None else None,
         )
+
         return {
-            "recognized": False,
-            "similarity": None,
-            "employee_id": None,
-            "name": None,
-            "employee_code": None,
+            "recognized": recognized,
+            "similarity": float(best_sim) if best_sim >= -0.5 else None,
+            "employee_id": emp_brief.get("employee_id") if recognized else None,
+            "name": emp_brief.get("name") if recognized else None,
+            "employee_code": emp_brief.get("employee_code") if recognized else None,
             "camera_id": camera_id,
             "event_type": event_type,
             "log_id": log_row.get("log_id"),
             "event_time": log_row.get("event_time"),
             "created_at": log_row.get("created_at"),
-            "message": "No enrolled faces found in DB.",
         }
 
-    best_emp_id: Optional[int] = None
-    best_sim: float = -1.0
-
-    for r in rows:
-        emb = _parse_pgvector(r.get("embedding"))
-        if emb is None:
-            continue
-        if emb.shape[0] != query_emb.shape[0]:
-            continue
-
-        sim = _cosine_similarity(query_emb, emb)
-        if sim > best_sim:
-            best_sim = sim
-            best_emp_id = r.get("employee_id")
-
-    recognized = bool(best_emp_id is not None and best_sim >= float(threshold))
-
-    # 4) 직원 정보(있으면) + 로그 저장
-    emp_brief: Dict[str, Any] = {}
-    if recognized and best_emp_id is not None:
-        emp_brief = _fetch_employee_brief(int(best_emp_id))
-        # 비활성 직원이면 인정 안 함 (원치 않으면 제거)
-        if emp_brief.get("is_active") is False:
-            recognized = False
-
-    log_row = _insert_attendance_log(
-        event_type=event_type,
-        camera_id=camera_id,
-        recognized=recognized,
-        similarity=float(best_sim) if best_sim >= -0.5 else None,
-        employee_id=int(best_emp_id) if recognized and best_emp_id is not None else None,
-    )
-
-    # 5) UI 친화 응답(핵심 키 보장)
-    return {
-        "recognized": recognized,
-        "similarity": float(best_sim) if best_sim >= -0.5 else None,
-        "employee_id": emp_brief.get("employee_id") if recognized else None,
-        "name": emp_brief.get("name") if recognized else None,
-        "employee_code": emp_brief.get("employee_code") if recognized else None,
-        "camera_id": camera_id,
-        "event_type": event_type,
-        "log_id": log_row.get("log_id"),
-        "event_time": log_row.get("event_time"),
-        "created_at": log_row.get("created_at"),
-    }
+    except HTTPException:
+        # ✅ 이미 우리가 의도적으로 만든 에러는 그대로 전달
+        raise
+    except Exception as e:
+        # ✅ 여기로 오면 "원래 Internal Server Error로 뭉개지던" 진짜 원인
+        tb = traceback.format_exc()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "msg": "recognize crashed (unhandled exception)",
+                "error": repr(e),
+                "trace": tb[-2500:],  # 너무 길면 마지막만
+            },
+        )
