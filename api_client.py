@@ -46,11 +46,6 @@ def _try_urls(method: str, urls: List[str], *, timeout: float = 30, **kwargs) ->
 
 
 def _wrap_recognize_response(res: Any) -> Dict[str, Any]:
-    """
-    UI는 recognized/similarity를 기대하는데(현재 UI 코드) :contentReference[oaicite:3]{index=3}
-    백엔드는 matched/score 형태일 가능성이 높아서(현재 api/main.py) :contentReference[oaicite:4]{index=4}
-    여기서 UI 호환 형태로 매핑.
-    """
     if not isinstance(res, dict):
         return {"recognized": False, "message": str(res)}
 
@@ -64,12 +59,17 @@ def _wrap_recognize_response(res: Any) -> Dict[str, Any]:
 
 
 # -------------------------
-# Public API for UI pages
+# Employees
 # -------------------------
 def list_employees(query: str = "", limit: int = 50, api_base: str = "") -> List[Dict[str, Any]]:
     b = _base(api_base)
     url = f"{b}/employees"
-    res = _try_urls("GET", [url], params={"query": query, "limit": limit})
+    # 백엔드가 q를 쓰든 query를 쓰든 둘 다 보내서 호환
+    params = {"limit": limit}
+    if query is not None:
+        params["q"] = query
+        params["query"] = query
+    res = _try_urls("GET", [url], params=params)
     if isinstance(res, list):
         return res
     if isinstance(res, dict) and isinstance(res.get("data"), list):
@@ -87,12 +87,45 @@ def create_employee(name: str, employee_code: Optional[str] = None, api_base: st
     return res if isinstance(res, dict) else {"result": res}
 
 
+def update_employee(employee_id: int, *, name: Optional[str] = None, employee_code: Optional[str] = None,
+                    is_active: Optional[bool] = None, role: Optional[str] = None, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/employees/{employee_id}"
+    payload: Dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    if employee_code is not None:
+        payload["employee_code"] = employee_code
+    if is_active is not None:
+        payload["is_active"] = is_active
+    if role is not None:
+        payload["role"] = role
+    res = _try_urls("PATCH", [url], json=payload)
+    return res if isinstance(res, dict) else {"result": res}
+
+
+def delete_employee(employee_id: int, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/employees/{employee_id}"
+    res = _try_urls("DELETE", [url])
+    return res if isinstance(res, dict) else {"result": res}
+
+
+# -------------------------
+# Faces (face_embeddings)
+# -------------------------
+def list_faces(limit: int = 200, api_base: str = "") -> List[Dict[str, Any]]:
+    b = _base(api_base)
+    url = f"{b}/faces"
+    res = _try_urls("GET", [url], params={"limit": limit})
+    if isinstance(res, list):
+        return res
+    if isinstance(res, dict) and isinstance(res.get("data"), list):
+        return res["data"]
+    return []
+
+
 def enroll_face(employee_id: int, image_bytes: bytes, api_base: str = "") -> Dict[str, Any]:
-    """
-    백엔드 구현마다 경로가 달라서 둘 다 시도:
-    - /faces/enroll/{id}  (현재 api/routes/faces.py 패턴)
-    - /employees/{id}/enroll-face (대체 패턴)
-    """
     b = _base(api_base)
     files = {"file": ("face.jpg", image_bytes, "image/jpeg")}
     urls = [
@@ -103,9 +136,20 @@ def enroll_face(employee_id: int, image_bytes: bytes, api_base: str = "") -> Dic
     return res if isinstance(res, dict) else {"result": res}
 
 
+def delete_face(employee_id: int, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/faces/{employee_id}"
+    res = _try_urls("DELETE", [url])
+    return res if isinstance(res, dict) else {"result": res}
+
+
+# -------------------------
+# Logs (attendance_logs)
+# -------------------------
 def fetch_logs(limit: int = 200, api_base: str = "") -> List[Dict[str, Any]]:
     b = _base(api_base)
     url = f"{b}/logs"
+    # 백엔드가 limit를 query로 받는다고 가정
     res = _try_urls("GET", [url], params={"limit": limit})
     if isinstance(res, list):
         return res
@@ -114,6 +158,78 @@ def fetch_logs(limit: int = 200, api_base: str = "") -> List[Dict[str, Any]]:
     return []
 
 
+# -------------------------
+# Cameras
+# -------------------------
+def list_cameras(limit: int = 200, api_base: str = "") -> List[Dict[str, Any]]:
+    b = _base(api_base)
+    url = f"{b}/cameras"
+    res = _try_urls("GET", [url], params={"limit": limit})
+    if isinstance(res, list):
+        return res
+    if isinstance(res, dict) and isinstance(res.get("data"), list):
+        return res["data"]
+    return []
+
+
+def create_camera(camera_id: str, is_active: bool = True, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/cameras"
+    res = _try_urls("POST", [url], json={"camera_id": camera_id, "is_active": is_active})
+    return res if isinstance(res, dict) else {"result": res}
+
+
+def toggle_camera(camera_id: str, is_active: bool, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/cameras/{camera_id}"
+    res = _try_urls("PATCH", [url], json={"is_active": is_active})
+    return res if isinstance(res, dict) else {"result": res}
+
+
+def delete_camera(camera_id: str, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/cameras/{camera_id}"
+    res = _try_urls("DELETE", [url])
+    return res if isinstance(res, dict) else {"result": res}
+
+
+# -------------------------
+# Schedules
+# -------------------------
+def list_schedules(limit: int = 200, api_base: str = "") -> List[Dict[str, Any]]:
+    b = _base(api_base)
+    url = f"{b}/schedules"
+    res = _try_urls("GET", [url], params={"limit": limit})
+    if isinstance(res, list):
+        return res
+    if isinstance(res, dict) and isinstance(res.get("data"), list):
+        return res["data"]
+    return []
+
+
+def create_schedule(employee_id: int, schedule: str, start_time: str, end_time: str, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/schedules"
+    payload = {
+        "employee_id": employee_id,
+        "schedule": schedule,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+    res = _try_urls("POST", [url], json=payload)
+    return res if isinstance(res, dict) else {"result": res}
+
+
+def delete_schedule(schedule_id: int, api_base: str = "") -> Dict[str, Any]:
+    b = _base(api_base)
+    url = f"{b}/schedules/{schedule_id}"
+    res = _try_urls("DELETE", [url])
+    return res if isinstance(res, dict) else {"result": res}
+
+
+# -------------------------
+# Recognize
+# -------------------------
 def recognize(image_bytes: bytes, event_type: str, camera_id: str, api_base: str = "") -> Dict[str, Any]:
     b = _base(api_base)
     url = f"{b}/recognize"

@@ -10,8 +10,7 @@ import onnxruntime as ort
 # Model paths
 # -------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(BASE_DIR, "models", "ai")
-
+MODEL_DIR = os.getenv("MODELS_DIR") or os.path.join(BASE_DIR, "models", "ai")
 RETINAFACE_MODEL_PATH = os.path.join(MODEL_DIR, "retinaface.onnx")
 ARCFACE_MODEL_PATH = os.path.join(MODEL_DIR, "arcface.onnx")
 

@@ -1,18 +1,36 @@
-from typing import Any, Dict, List, Optional
+# api/common.py
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Callable
 from fastapi import HTTPException
 
-def raise_if_error(resp: Any, msg: str) -> None:
-    err = getattr(resp, "error", None)
-    if err:
-        raise HTTPException(status_code=500, detail=f"{msg}: {err}")
 
-def ensure_one(resp: Any, msg: str) -> Dict[str, Any]:
-    raise_if_error(resp, msg)
-    if not resp.data:
-        raise HTTPException(status_code=404, detail=f"{msg}: not found")
-    # supabase-py의 single()은 dict, 아니면 list일 수 있음
-    if isinstance(resp.data, list):
-        if len(resp.data) == 0:
-            raise HTTPException(status_code=404, detail=f"{msg}: not found")
-        return resp.data[0]
-    return resp.data
+def execute_or_500(fn: Callable[[], Any], msg: str) -> Any:
+    """
+    supabase-py / postgrest-py는 실패 시 보통 예외를 던진다.
+    (APIResponse.error 같은 속성에 의존하면 안 됨)
+    """
+    try:
+        return fn()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{msg}: {e}")
+
+
+def get_data(resp: Any) -> List[Dict[str, Any]]:
+    data = getattr(resp, "data", None)
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+def get_one_or_404(resp: Any, not_found_msg: str) -> Dict[str, Any]:
+    rows = get_data(resp)
+    if not rows:
+        raise HTTPException(status_code=404, detail=not_found_msg)
+    return rows[0]
