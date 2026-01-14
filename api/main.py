@@ -1,4 +1,5 @@
-import os
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -6,13 +7,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import employees, faces, logs, cameras, recognize
+from api.routes import employees, faces, logs, cameras, recognize, schedules  # ✅ add schedules
 
 load_dotenv()
 
 app = FastAPI(title="Face Attendance API")
 
-# CORS: allow Streamlit/local and broad access for dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # tighten for prod
@@ -21,12 +21,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount routers
 app.include_router(employees.router)
 app.include_router(faces.router)
 app.include_router(logs.router)
 app.include_router(cameras.router)
 app.include_router(recognize.router)
+app.include_router(schedules.router)  # ✅ mount schedules
 
 
 @app.get("/")

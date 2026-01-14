@@ -1,19 +1,13 @@
-# api/routes/employees.py
 from __future__ import annotations
 
-from typing import Optional, Any, Dict
+from typing import Any, Optional, List
+
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File
-from pydantic import BaseModel, Field
 
 from api.supabase_client import get_supabase
+from api.schemas import EmployeeCreateRequest, EmployeeUpdateRequest, EmployeeResponse
 
 router = APIRouter(prefix="/employees", tags=["employees"])
-
-
-class EmployeeCreateRequest(BaseModel):
-    employee_code: Optional[str] = Field(default=None, description="Employee visible code (e.g., EMP001)")
-    name: str = Field(..., min_length=1)
-    is_active: bool = True
 
 
 def _raise_if_error(resp: Any, msg: str) -> None:
@@ -22,85 +16,86 @@ def _raise_if_error(resp: Any, msg: str) -> None:
         raise HTTPException(status_code=500, detail=f"{msg}: {err}")
 
 
-def _model_to_dict(model: BaseModel) -> Dict[str, Any]:
-    if hasattr(model, "model_dump"):
-        return model.model_dump()  # pydantic v2
-    return model.dict()  # pydantic v1
-
-
-@router.get("")
+@router.get("", response_model=List[EmployeeResponse])
 def list_employees(
-    query: str = Query(default="", description="Search by name or code"),
-    limit: int = Query(default=50, ge=1, le=200),
+    q: Optional[str] = Query(default=None, description="Search by name or employee_code (contains)"),
+    is_active: Optional[bool] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=2000),
 ) -> Any:
     sb = get_supabase()
+    query = sb.table("employees").select("*").limit(limit)
 
-    q = sb.table("employees").select("*").limit(limit)
-    if query:
-        # 기존 코드는 name만 ilike였는데, code도 같이 검색되면 UI가 더 편함
-        q = q.or_(f"name.ilike.%{query}%,employee_code.ilike.%{query}%")
+    if is_active is not None:
+        query = query.eq("is_active", is_active)
 
-    resp = q.execute()
+    # NOTE: supabase-py doesn't have OR contains in a super clean way for all backends.
+    # We'll do a simple "ilike" filter if q exists (name or employee_code).
+    if q:
+        # PostgREST "or" syntax
+        query = query.or_(f"name.ilike.%{q}%,employee_code.ilike.%{q}%")
+
+    resp = query.execute()
     _raise_if_error(resp, "Failed to list employees")
-    employees = resp.data or []
-
-    # attach has_face flag by checking face_embeddings table
-    emp_ids = [e.get("employee_id") for e in employees if e.get("employee_id") is not None]
-    face_map = set()
-
-    if emp_ids:
-        face_resp = (
-            sb.table("face_embeddings")
-            .select("employee_id")
-            .in_("employee_id", emp_ids)
-            .execute()
-        )
-        if not getattr(face_resp, "error", None):
-            face_map = {r.get("employee_id") for r in (face_resp.data or [])}
-
-    for e in employees:
-        e["has_face"] = e.get("employee_id") in face_map
-
-    return employees
+    return resp.data or []
 
 
-@router.post("")
-def create_employee(req: EmployeeCreateRequest) -> Any:
-    sb = get_supabase()
-    payload = _model_to_dict(req)
-
-    resp = sb.table("employees").insert(payload).execute()
-    _raise_if_error(resp, "Failed to create employee")
-    return (resp.data or [{}])[0]
-
-
-@router.get("/{employee_id}")
+@router.get("/{employee_id}", response_model=EmployeeResponse)
 def get_employee(employee_id: int) -> Any:
     sb = get_supabase()
-    resp = sb.table("employees").select("*").eq("employee_id", employee_id).single().execute()
+    resp = sb.table("employees").select("*").eq("employee_id", employee_id).maybe_single().execute()
     _raise_if_error(resp, "Failed to get employee")
-    emp = resp.data or {}
-
-    face_resp = sb.table("face_embeddings").select("employee_id").eq("employee_id", employee_id).execute()
-    if not getattr(face_resp, "error", None):
-        emp["has_face"] = bool(face_resp.data)
-
-    return emp
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return resp.data
 
 
-@router.patch("/{employee_id}")
-def update_employee(employee_id: int, patch: Dict[str, Any]) -> Any:
+@router.post("", response_model=EmployeeResponse)
+def create_employee(payload: EmployeeCreateRequest) -> Any:
     sb = get_supabase()
-    resp = sb.table("employees").update(patch).eq("employee_id", employee_id).execute()
+    resp = sb.table("employees").insert(payload.model_dump(exclude_none=True)).execute()
+    _raise_if_error(resp, "Failed to create employee")
+    if not resp.data:
+        raise HTTPException(status_code=500, detail="Insert succeeded but returned no data")
+    return resp.data[0]
+
+
+@router.patch("/{employee_id}", response_model=EmployeeResponse)
+def update_employee(employee_id: int, payload: EmployeeUpdateRequest) -> Any:
+    sb = get_supabase()
+    data = payload.model_dump(exclude_none=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    resp = sb.table("employees").update(data).eq("employee_id", employee_id).execute()
     _raise_if_error(resp, "Failed to update employee")
-    return (resp.data or [{}])[0]
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return resp.data[0]
 
 
+@router.delete("/{employee_id}")
+def delete_employee(employee_id: int) -> Any:
+    """
+    Hard delete.
+    If you prefer safer approach: use PATCH is_active=false in UI instead.
+    """
+    sb = get_supabase()
+    resp = sb.table("employees").delete().eq("employee_id", employee_id).execute()
+    _raise_if_error(resp, "Failed to delete employee")
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Employee not found or already deleted")
+    return {"ok": True, "deleted": resp.data[0]}
+
+
+# -----------------------------
+# Compatibility endpoint (UI)
+# -----------------------------
 @router.post("/{employee_id}/enroll-face")
 async def enroll_face_compat(employee_id: int, file: UploadFile = File(...)) -> Any:
     """
-    UI 호환 엔드포인트:
-    /employees/{id}/enroll-face -> /faces/enroll/{id}
+    UI compatibility:
+    /employees/{id}/enroll-face  -> forwards to /faces/enroll/{id}
+    (avoid circular import by local import)
     """
     from api.routes.faces import enroll_face  # local import
     return await enroll_face(employee_id, file)

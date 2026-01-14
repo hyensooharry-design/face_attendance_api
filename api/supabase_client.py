@@ -1,14 +1,13 @@
 import os
-from pathlib import Path
-from dotenv import load_dotenv
 from supabase import create_client, Client
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
-
+_supabase: Client | None = None
 
 def get_supabase() -> Client:
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    if not url or not key:
-        raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing in environment")
-    return create_client(url, key)
+    global _supabase
+    if _supabase is None:
+        url = os.environ["SUPABASE_URL"]
+        # CRUD 전체를 서버에서 확실하게 하기 위해 service role 권장
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ["SUPABASE_ANON_KEY"]
+        _supabase = create_client(url, key)
+    return _supabase
