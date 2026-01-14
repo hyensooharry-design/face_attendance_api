@@ -12,14 +12,41 @@ from api.embedding import get_embedding_from_image_bytes
 
 router = APIRouter(tags=["recognize"])
 
+# ✅ event_type enum 방어
+VALID_EVENT_TYPES = {"CHECK_IN", "CHECK_OUT"}
+
 
 # -----------------------------
 # Utilities
 # -----------------------------
 def _raise_if_error(resp: Any, msg: str) -> None:
+    """
+    supabase-py 응답에서 error가 있으면 FastAPI 예외로 변환.
+    Render에서 원인 파악이 되도록 detail을 더 풍부하게 보여줌.
+    """
     err = getattr(resp, "error", None)
     if err:
-        raise HTTPException(status_code=500, detail=f"{msg}: {err}")
+        # ✅ err가 dict/string 등 다양하므로 repr로 최대한 보존
+        raise HTTPException(status_code=500, detail={"msg": msg, "error": repr(err)})
+
+
+def _normalize_event_type(v: str) -> str:
+    # ✅ UI/Swagger/다른 호출에서 check_in/check-out 같은 값이 와도 통일
+    raw = (v or "").strip()
+    up = raw.upper()
+
+    # 흔한 변형 흡수
+    if up in {"CHECKIN", "CHECK-IN", "CHECK_IN"}:
+        up = "CHECK_IN"
+    elif up in {"CHECKOUT", "CHECK-OUT", "CHECK_OUT"}:
+        up = "CHECK_OUT"
+
+    if up not in VALID_EVENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid event_type: {raw!r}. Use one of {sorted(VALID_EVENT_TYPES)}",
+        )
+    return up
 
 
 def _parse_pgvector(v: Any) -> Optional[np.ndarray]:
@@ -63,10 +90,11 @@ def _ensure_camera_exists(camera_id: str) -> None:
     -> recognize에서 미리 upsert로 보장.
     """
     sb = get_supabase()
-    resp = sb.table("cameras").upsert(
-        {"camera_id": camera_id, "is_active": True},
-        on_conflict="camera_id"
-    ).execute()
+    resp = (
+        sb.table("cameras")
+        .upsert({"camera_id": camera_id, "is_active": True}, on_conflict="camera_id")
+        .execute()
+    )
     _raise_if_error(resp, "Failed to ensure camera exists")
 
 
@@ -118,7 +146,16 @@ def _insert_attendance_log(
         "employee_id": employee_id,
         "created_at": now,
     }
-    resp = sb.table("attendance_logs").insert(payload).execute()
+
+    try:
+        resp = sb.table("attendance_logs").insert(payload).execute()
+    except Exception as e:
+        # ✅ postgrest exceptions 등 여기서 직접 터지는 케이스도 잡아서 원인 노출
+        raise HTTPException(
+            status_code=500,
+            detail={"msg": "Failed to insert attendance log (exception)", "error": repr(e)},
+        )
+
     _raise_if_error(resp, "Failed to insert attendance log")
     return (resp.data or [{}])[0]
 
@@ -133,6 +170,9 @@ async def recognize(
     camera_id: str = Form(...),
     threshold: float = Form(0.35),
 ) -> Dict[str, Any]:
+    # ✅ 0) event_type normalize (DB enum 불일치 방지)
+    event_type = _normalize_event_type(event_type)
+
     # 1) camera FK 보장
     camera_id = (camera_id or "").strip()
     if not camera_id:
@@ -147,7 +187,7 @@ async def recognize(
     try:
         query_emb = get_embedding_from_image_bytes(img_bytes).astype(np.float32)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"embedding failed: {e}")
+        raise HTTPException(status_code=500, detail={"msg": "embedding failed", "error": repr(e)})
 
     # 3) DB 임베딩 fetch -> best match
     rows = _fetch_all_embeddings(limit=2000)
