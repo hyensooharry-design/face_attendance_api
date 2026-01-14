@@ -11,7 +11,7 @@ import cv2
 # -----------------------------------------------------------------------------
 _MODEL_AVAILABLE = True
 try:
-    from models.face_models import load_retinaface, load_arcface  # type: ignore
+    from api.models.face_models import load_retinaface, load_arcface  # type: ignore
 except Exception:
     _MODEL_AVAILABLE = False
     load_retinaface = None  # type: ignore
