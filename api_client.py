@@ -32,16 +32,35 @@ def _base(api_base: Optional[str]) -> str:
 
 
 def _try_urls(method: str, urls: List[str], *, timeout: float = 30, **kwargs) -> Any:
+    """
+    여러 URL fallback 시도.
+    ✅ 에러(4xx/5xx) 시에도 가능한 한 JSON(detail/trace)을 그대로 보여주도록 개선.
+    """
     last_err: Optional[str] = None
+
     for url in urls:
         try:
             r = requests.request(method, url, headers=_headers(), timeout=timeout, **kwargs)
+            ctype = (r.headers.get("content-type") or "").lower()
+
+            # 성공
             if r.status_code < 400:
-                ctype = (r.headers.get("content-type") or "").lower()
                 return r.json() if "application/json" in ctype else r.text
-            last_err = f"{r.status_code} {r.text[:300]}"
+
+            # 실패: JSON이면 JSON을 최대한 살려서 노출
+            if "application/json" in ctype:
+                try:
+                    j = r.json()
+                    # FastAPI는 보통 {"detail": ...} 형태
+                    last_err = f"{r.status_code} {str(j)[:1200]}"
+                except Exception:
+                    last_err = f"{r.status_code} {r.text[:1200]}"
+            else:
+                last_err = f"{r.status_code} {r.text[:1200]}"
+
         except Exception as e:
             last_err = str(e)
+
     raise ApiError(f"API call failed. Tried: {urls}\nLast error: {last_err}")
 
 
@@ -87,8 +106,15 @@ def create_employee(name: str, employee_code: Optional[str] = None, api_base: st
     return res if isinstance(res, dict) else {"result": res}
 
 
-def update_employee(employee_id: int, *, name: Optional[str] = None, employee_code: Optional[str] = None,
-                    is_active: Optional[bool] = None, role: Optional[str] = None, api_base: str = "") -> Dict[str, Any]:
+def update_employee(
+    employee_id: int,
+    *,
+    name: Optional[str] = None,
+    employee_code: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    role: Optional[str] = None,
+    api_base: str = "",
+) -> Dict[str, Any]:
     b = _base(api_base)
     url = f"{b}/employees/{employee_id}"
     payload: Dict[str, Any] = {}

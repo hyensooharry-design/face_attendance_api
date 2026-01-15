@@ -10,3 +10,5 @@ torchvision==0.16.2
 facenet-pytorch==2.5.3
 supabase==2.27.0
 requests==2.31.0
+onnxruntime
+postgrest
