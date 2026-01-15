@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 api/models/ai/*.onnx
 *.onnx
+
+# Large model artifacts
+api/models.zip
+api/models/**
+*.onnx
+
