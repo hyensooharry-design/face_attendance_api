@@ -14,16 +14,13 @@ router = APIRouter(prefix="/cameras", tags=["cameras"])
 
 @router.get("", response_model=List[CameraResponse])
 def list_cameras(
-    is_active: Optional[bool] = Query(default=None),
     limit: int = Query(default=200, ge=1, le=2000),
 ) -> Any:
     sb = get_supabase()
 
     def _run():
-        q = sb.table("cameras").select("*").limit(limit)
-        if is_active is not None:
-            q = q.eq("is_active", is_active)
-        return q.execute()
+        # Render schema: cameras(camera_id, name, location, created_at)
+        return sb.table("cameras").select("*").limit(limit).execute()
 
     resp = execute_or_500(_run, "list cameras")
     return get_data(resp)

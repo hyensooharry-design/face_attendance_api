@@ -32,21 +32,34 @@ def list_employees(
     resp = execute_or_500(_run, "list employees")
     rows = get_data(resp)
 
-    # has_face 붙이기 (face_embeddings PK = employee_id)
+    # has_face 붙이기
+    # Render schema: employees(employee_id) -> persons(employee_id) -> face_embeddings(person_id)
     emp_ids = [r.get("employee_id") for r in rows if r.get("employee_id") is not None]
-    face_set = set()
+    face_emp_set = set()
 
     if emp_ids:
-        face_resp = execute_or_500(
-            lambda: sb.table("face_embeddings").select("employee_id").in_("employee_id", emp_ids).execute(),
-            "list face_embeddings for has_face",
+        # 1) map employees -> person ids
+        persons_resp = execute_or_500(
+            lambda: sb.table("persons").select("id, employee_id").in_("employee_id", emp_ids).execute(),
+            "list persons for has_face",
         )
-        for fr in get_data(face_resp):
-            if fr.get("employee_id") is not None:
-                face_set.add(fr["employee_id"])
+        person_rows = get_data(persons_resp)
+        emp_by_person = {pr["id"]: pr.get("employee_id") for pr in person_rows if pr.get("id")}
+        person_ids = list(emp_by_person.keys())
+
+        # 2) check which persons have embeddings
+        if person_ids:
+            emb_resp = execute_or_500(
+                lambda: sb.table("face_embeddings").select("person_id").in_("person_id", person_ids).execute(),
+                "list face_embeddings for has_face",
+            )
+            for er in get_data(emb_resp):
+                pid = er.get("person_id")
+                if pid in emp_by_person and emp_by_person[pid] is not None:
+                    face_emp_set.add(emp_by_person[pid])
 
     for r in rows:
-        r["has_face"] = r.get("employee_id") in face_set
+        r["has_face"] = r.get("employee_id") in face_emp_set
 
     return rows
 
@@ -60,8 +73,19 @@ def get_employee(employee_id: int) -> Any:
     )
     row = get_one_or_404(resp, "Employee not found")
 
+    # has_face: persons -> face_embeddings
+    p = execute_or_500(
+        lambda: sb.table("persons").select("id").eq("employee_id", employee_id).maybe_single().execute(),
+        "get person for has_face",
+    )
+    p_rows = get_data(p)
+    if not p_rows:
+        row["has_face"] = False
+        return row
+
+    person_id = p_rows[0].get("id")
     face_resp = execute_or_500(
-        lambda: sb.table("face_embeddings").select("employee_id").eq("employee_id", employee_id).maybe_single().execute(),
+        lambda: sb.table("face_embeddings").select("id").eq("person_id", person_id).limit(1).execute(),
         "get face_embeddings",
     )
     row["has_face"] = bool(get_data(face_resp))
@@ -94,8 +118,18 @@ def update_employee(employee_id: int, body: EmployeeUpdateRequest) -> Any:
     )
     row = get_one_or_404(resp, "Employee not found")
 
+    p = execute_or_500(
+        lambda: sb.table("persons").select("id").eq("employee_id", employee_id).maybe_single().execute(),
+        "get person for has_face",
+    )
+    p_rows = get_data(p)
+    if not p_rows:
+        row["has_face"] = False
+        return row
+
+    person_id = p_rows[0].get("id")
     face_resp = execute_or_500(
-        lambda: sb.table("face_embeddings").select("employee_id").eq("employee_id", employee_id).maybe_single().execute(),
+        lambda: sb.table("face_embeddings").select("id").eq("person_id", person_id).limit(1).execute(),
         "get face_embeddings",
     )
     row["has_face"] = bool(get_data(face_resp))

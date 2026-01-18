@@ -2,79 +2,67 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Optional, Dict, Any
 
 import cv2
 import streamlit as st
 from dotenv import load_dotenv
-from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 
 import api_client as api_service
 from styles import theme
 from ui import header, overlays, sidebar
 
-
-# ---------------------------------------------------------------------
-# Env / Config
-# ---------------------------------------------------------------------
 load_dotenv()
 
+# ------------------------------------
+# Config
+# ------------------------------------
 API_BASE_DEFAULT = os.getenv("API_BASE", "http://127.0.0.1:8000").rstrip("/")
-SCAN_INTERVAL_SEC = float(os.getenv("SCAN_INTERVAL_SEC", "1.5"))  # default 1.5s
-CAMERA_ID_DEFAULT = os.getenv("CAMERA_ID_DEFAULT", "CAM_MAIN")
-EVENT_TYPE_DEFAULT = os.getenv("EVENT_TYPE_DEFAULT", "CHECK_IN")
+SCAN_INTERVAL_SEC = float(os.getenv("SCAN_INTERVAL_SEC", "1.5"))  # scan every N seconds
+AUTO_REFRESH_MS = int(os.getenv("AUTO_REFRESH_MS", "500"))        # rerun UI every N ms when camera is on
 
-
-# ---------------------------------------------------------------------
-# Streamlit Setup
-# ---------------------------------------------------------------------
+# ------------------------------------
+# Setup
+# ------------------------------------
 st.set_page_config(page_title="Timekeeping", page_icon="📷", layout="wide")
 theme.apply()
-
-# Sidebar may update st.session_state["api_base"] etc.
 sidebar.render_sidebar()
 
-# Resolve api_base (session > env > default)
 api_base = (st.session_state.get("api_base") or API_BASE_DEFAULT).rstrip("/")
 
-# Session defaults
+# session defaults
 st.session_state.setdefault("last_scan_ts", 0.0)
-st.session_state.setdefault("last_scan_result", None)  # type: ignore[assignment]
-st.session_state.setdefault("last_scan_error", None)
-st.session_state.setdefault("scan_enabled", True)  # you can toggle if you want later
+st.session_state.setdefault("last_scan_result", None)   # type: Optional[Dict[str, Any]]
+st.session_state.setdefault("last_scan_error", None)    # type: Optional[str]
+st.session_state.setdefault("scan_enabled", True)
 
-
-# ---------------------------------------------------------------------
-# UI Header
-# ---------------------------------------------------------------------
+# UI
 header.render_header("Timekeeping Area", "Please place your face in the frame.")
 
 col_cam, col_info = st.columns([2, 1])
 
-
-# ---------------------------------------------------------------------
-# Video Processor
-# ---------------------------------------------------------------------
+# ------------------------------------
+# Video processor
+# ------------------------------------
 class VideoProcessor(VideoProcessorBase):
-    """Keep the latest frame for periodic scanning."""
-    def __init__(self) -> None:
+    def __init__(self):
         self.latest_bgr = None
 
     def recv(self, frame):
         self.latest_bgr = frame.to_ndarray(format="bgr24")
         return frame
 
-
-# ---------------------------------------------------------------------
-# LEFT COLUMN: Camera View
-# ---------------------------------------------------------------------
+# ------------------------------------
+# Camera column
+# ------------------------------------
 with col_cam:
     st.markdown(
         '<div class="viewfinder-container">'
         '<div class="corner tl"></div><div class="corner tr"></div>'
         '<div class="corner bl"></div><div class="corner br"></div>'
         '<div class="scanline"></div>',
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
     ctx = webrtc_streamer(
@@ -87,101 +75,99 @@ with col_cam:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-
-# ---------------------------------------------------------------------
-# RIGHT COLUMN: Results
-# ---------------------------------------------------------------------
+# ------------------------------------
+# Result column
+# ------------------------------------
 with col_info:
-    # Optional: show which API is being used (helps debugging)
-    with st.expander("Debug", expanded=False):
-        st.write("API Base:", api_base)
-        st.write("Event Type:", EVENT_TYPE_DEFAULT)
-        st.write("Camera ID:", CAMERA_ID_DEFAULT)
-        if st.session_state.get("last_scan_error"):
-            st.error(st.session_state["last_scan_error"])
+    st.caption(f"API Base: `{api_base}`")
+
+    scan_enabled = st.toggle("Enable scanning", value=st.session_state.scan_enabled)
+    st.session_state.scan_enabled = scan_enabled
 
     res = st.session_state.get("last_scan_result")
+    err = st.session_state.get("last_scan_error")
 
-    if isinstance(res, dict):
-        if res.get("recognized") is True:
-            overlays.render_success_message(
-                res.get("name"),
-                res.get("employee_code"),
-                res.get("similarity"),
-            )
+    if err:
+        st.error(err)
+
+    if res:
+        if res.get("recognized"):
+            overlays.render_success_message(res.get("name"), res.get("employee_code"), res.get("similarity"))
         else:
             overlays.render_denied_message()
     else:
         st.info("Waiting for scan...")
 
+    with st.expander("Debug", expanded=False):
+        st.write(
+            {
+                "playing": bool(getattr(ctx.state, "playing", False)),
+                "has_video_processor": bool(ctx.video_processor),
+                "last_scan_ts": st.session_state.get("last_scan_ts"),
+                "now": time.time(),
+            }
+        )
 
-# ---------------------------------------------------------------------
-# Helper: Safe recognize call
-# ---------------------------------------------------------------------
-def _recognize_once(
-    frame_bgr,
-    *,
-    event_type: str,
-    camera_id: str,
-    api_base_url: str,
-) -> Optional[Dict[str, Any]]:
-    """Encode frame -> call /recognize -> normalize response to dict."""
-    ok, buf = cv2.imencode(".jpg", frame_bgr)
+# ------------------------------------
+# Helper: encode frame smaller (reduce latency)
+# ------------------------------------
+def _encode_jpg(bgr, max_w: int = 640, quality: int = 85) -> Optional[bytes]:
+    if bgr is None:
+        return None
+
+    h, w = bgr.shape[:2]
+    if w > max_w:
+        scale = max_w / float(w)
+        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)))
+
+    ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not ok:
-        raise RuntimeError("Failed to encode frame as JPG.")
+        return None
+    return buf.tobytes()
 
-    resp = api_service.recognize(
-        buf.tobytes(),
-        event_type,
-        camera_id,
-        api_base_url,
-    )
+# ------------------------------------
+# Auto refresh (so scanning continues even if API fails)
+# ------------------------------------
+def _autorefresh_when_playing():
+    if getattr(ctx.state, "playing", False):
+        # Streamlit의 experimental rerun 루프를 안정화하기 위한 트릭:
+        # 특정 시간 간격마다 query param을 바꿔 rerun 유도
+        st.query_params["_t"] = str(int(time.time() * 1000) // AUTO_REFRESH_MS)
 
-    # Normalize/validate
-    if resp is None:
-        raise RuntimeError("API returned empty response (None).")
+_autorefresh_when_playing()
 
-    if not isinstance(resp, dict):
-        raise RuntimeError(f"API returned non-dict response: {type(resp)}")
+# ------------------------------------
+# Scan step
+# ------------------------------------
+def _should_scan() -> bool:
+    if not st.session_state.scan_enabled:
+        return False
+    if not getattr(ctx.state, "playing", False):
+        return False
+    if not ctx.video_processor:
+        return False
+    last = float(st.session_state.get("last_scan_ts") or 0.0)
+    return (time.time() - last) >= SCAN_INTERVAL_SEC
 
-    # Ensure keys exist at least
-    resp.setdefault("recognized", False)
-    return resp
+if _should_scan():
+    frame = ctx.video_processor.latest_bgr if ctx.video_processor else None
+    jpg = _encode_jpg(frame)
 
+    if jpg is None:
+        st.session_state.last_scan_error = "Camera frame is not ready yet."
+        st.session_state.last_scan_ts = time.time()
+        st.rerun()
+    else:
+        try:
+            # Default is CHECK_IN, Camera Default
+            resp = api_service.recognize(jpg, "CHECK_IN", "CAM_MAIN", api_base)
 
-# ---------------------------------------------------------------------
-# BACKGROUND PROCESS: periodic scan (every SCAN_INTERVAL_SEC)
-# ---------------------------------------------------------------------
-should_scan = (
-    st.session_state.get("scan_enabled", True)
-    and ctx is not None
-    and ctx.state.playing
-    and ctx.video_processor is not None
-)
+            st.session_state.last_scan_result = resp
+            st.session_state.last_scan_error = None
+            st.session_state.last_scan_ts = time.time()
+            st.rerun()
 
-if should_scan:
-    now = time.time()
-    last_ts = float(st.session_state.get("last_scan_ts", 0.0))
-    if (now - last_ts) >= SCAN_INTERVAL_SEC:
-        frame = getattr(ctx.video_processor, "latest_bgr", None)
-
-        # Advance the timer even if frame is None to prevent tight rerun loops
-        st.session_state["last_scan_ts"] = now
-
-        if frame is not None:
-            try:
-                st.session_state["last_scan_error"] = None
-                result = _recognize_once(
-                    frame,
-                    event_type=EVENT_TYPE_DEFAULT,
-                    camera_id=CAMERA_ID_DEFAULT,
-                    api_base_url=api_base,
-                )
-                st.session_state["last_scan_result"] = result
-            except Exception as e:
-                # Don’t hide errors — this is what makes “model conflict?” confusion.
-                st.session_state["last_scan_result"] = {"recognized": False}
-                st.session_state["last_scan_error"] = f"{type(e).__name__}: {e}"
-
-            # Trigger UI update once per scan attempt
+        except Exception as e:
+            st.session_state.last_scan_error = f"Recognize call failed: {type(e).__name__}: {e}"
+            st.session_state.last_scan_ts = time.time()
             st.rerun()

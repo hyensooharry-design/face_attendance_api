@@ -1,14 +1,16 @@
 # api/schemas.py
 from __future__ import annotations
 
-from typing import Optional, Literal
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
 # -----------------------------
 # employees
 # -----------------------------
-RoleType = Literal["Team Leader", "Manager", "Worker"]
+# DB: role TEXT (자유 문자열)
+# API: Literal 제거 → Optional[str]로 완화
+RoleType = str
 
 
 class EmployeeCreateRequest(BaseModel):
@@ -38,11 +40,12 @@ class EmployeeResponse(BaseModel):
 # face_embeddings
 # -----------------------------
 class FaceResponse(BaseModel):
+    # Render schema: persons(employee_id) -> face_embeddings(person_id)
     employee_id: int
-    embedding_dim: int = 512
+    person_id: str
     model_name: Optional[str] = None
     model_version: Optional[str] = None
-    # embedding 컬럼(pgvector)은 너무 길어서 기본 응답에서는 제외 (필요하면 별도 옵션으로 조회)
+    # embedding(pgvector)은 응답에서 제외
 
 
 # -----------------------------
@@ -50,22 +53,25 @@ class FaceResponse(BaseModel):
 # -----------------------------
 class CameraCreateRequest(BaseModel):
     camera_id: str = Field(min_length=1)
-    is_active: bool = True
+    name: Optional[str] = None
+    location: Optional[str] = None
 
 
 class CameraUpdateRequest(BaseModel):
-    is_active: Optional[bool] = None
+    name: Optional[str] = None
+    location: Optional[str] = None
 
 
 class CameraResponse(BaseModel):
     camera_id: str
-    is_active: bool = True
+    name: Optional[str] = None
+    location: Optional[str] = None
     created_at: Optional[str] = None
 
 
 # -----------------------------
 # attendance_logs
-# event_type는 DB에서 USER-DEFINED(enum)이라서 여기서는 str로 받음
+# event_type: DB에서는 TEXT / enum 혼용 가능 → str 유지
 # -----------------------------
 class AttendanceLogCreateRequest(BaseModel):
     event_time: Optional[str] = None  # timestamptz ISO string (optional)
@@ -99,11 +105,13 @@ class AttendanceLogResponse(BaseModel):
 # -----------------------------
 # schedules
 # -----------------------------
+# DB: start_time / end_time NULL 허용
+# API: 필수 → Optional 로 완화
 class ScheduleCreateRequest(BaseModel):
     employee_id: int
     schedule: str
-    start_time: str  # timestamptz ISO string
-    end_time: str    # timestamptz ISO string
+    start_time: Optional[str] = None  # timestamptz ISO string
+    end_time: Optional[str] = None    # timestamptz ISO string
 
 
 class ScheduleUpdateRequest(BaseModel):
@@ -117,5 +125,5 @@ class ScheduleResponse(BaseModel):
     schedule_id: int
     employee_id: int
     schedule: str
-    start_time: str
-    end_time: str
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None

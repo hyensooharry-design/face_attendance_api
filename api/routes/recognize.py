@@ -91,24 +91,45 @@ def _ensure_camera_exists(camera_id: str) -> None:
     -> recognize에서 미리 upsert로 보장.
     """
     sb = get_supabase()
-    resp = (
-        sb.table("cameras")
-        .upsert({"camera_id": camera_id, "is_active": True}, on_conflict="camera_id")
-        .execute()
-    )
+    # Render schema: cameras(camera_id TEXT PK, name TEXT, location TEXT, created_at TIMESTAMPTZ)
+    # -> Do not write columns that don't exist (e.g., is_active).
+    resp = sb.table("cameras").upsert({"camera_id": camera_id}, on_conflict="camera_id").execute()
     _raise_if_error(resp, "Failed to ensure camera exists")
 
 
 def _fetch_all_embeddings(limit: int = 2000) -> List[Dict[str, Any]]:
     sb = get_supabase()
+    # Render schema:
+    #   face_embeddings(id, person_id, embedding, model_name, model_version, created_at)
+    #   persons(id, employee_id, ...)
+    # -> fetch person_id + embedding + linked employee_id via persons.
     resp = (
         sb.table("face_embeddings")
-        .select("employee_id, embedding_dim, embedding")
+        .select("person_id, embedding, persons(employee_id)")
         .limit(limit)
         .execute()
     )
     _raise_if_error(resp, "Failed to fetch face embeddings")
     return resp.data or []
+
+
+def _extract_employee_id_from_row(row: Dict[str, Any]) -> Optional[int]:
+    """Extract employee_id from a face_embeddings row.
+
+    With PostgREST embedded relations, `persons(employee_id)` can come back as:
+    - a dict: {"employee_id": 1}
+    - a list: [{"employee_id": 1}] (depending on relationship cardinality)
+    """
+    rel = row.get("persons")
+    if rel is None:
+        return None
+    if isinstance(rel, dict):
+        v = rel.get("employee_id")
+        return int(v) if v is not None else None
+    if isinstance(rel, list) and rel:
+        v = (rel[0] or {}).get("employee_id")
+        return int(v) if v is not None else None
+    return None
 
 
 def _fetch_employee_brief(employee_id: int) -> Dict[str, Any]:
@@ -224,7 +245,7 @@ async def recognize(
             sim = _cosine_similarity(query_emb, emb)
             if sim > best_sim:
                 best_sim = sim
-                best_emp_id = r.get("employee_id")
+                best_emp_id = _extract_employee_id_from_row(r)
 
         recognized = bool(best_emp_id is not None and best_sim >= float(threshold))
 
