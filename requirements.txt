@@ -4,11 +4,11 @@ python-multipart==0.0.9
 python-dotenv==1.0.1
 numpy==1.26.4
 pillow==10.2.0
-opencv-python-headless==4.9.0.80
+opencv-python==4.9.0.80
 torch==2.1.2
 torchvision==0.16.2
 facenet-pytorch==2.5.3
 supabase==2.27.0
 requests==2.31.0
-onnxruntime
-postgrest
+streamlit
+streamlit-webrtc
