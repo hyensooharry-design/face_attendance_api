@@ -1,157 +1,160 @@
 import streamlit as st
 import api_client as api_service
+import pandas as pd
+from ui import design_system, header, sidebar, tables, overlays
+import cv2
 
-from styles import theme
-from ui import header, sidebar, tables
-
-st.set_page_config(page_title="Database", page_icon="🗃️", layout="wide")
-theme.apply()
+st.set_page_config(page_title="Employee Database", page_icon="👥", layout="wide")
+design_system.apply()
 sidebar.render_sidebar()
 
-api_base = (st.session_state.get("api_base") or "http://127.0.0.1:8000").rstrip("/")
+header.render_header("Personnel Intelligence", "Manage secure database, biometric records, and system access.")
 
-header.render_header("Database", "Add new employees and register faces.")
+# --- FILTERS & ACTIONS ---
+with st.container():
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1], gap="medium")
+    with c1:
+        search_q = st.text_input("🔍 Search Personnel", placeholder="Name or ID...")
+    with c2:
+        status_filter = st.selectbox("Registry Status", ["All Personnel", "Active Registry", "Unregistered"])
+    with c3:
+        st.write("") # Padding
+        if st.button("➕ Add New", use_container_width=True):
+            st.session_state.show_add_modal = True
+    with c4:
+        st.write("") # Padding
+        if st.button("📊 Export CSV", use_container_width=True):
+            try:
+                all_emp = api_service.list_employees()
+                df = pd.DataFrame(all_emp)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Report",
+                    data=csv,
+                    file_name="personnel_registry.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error("Export Failed")
 
-# ----------------------------
-# helpers
-# ----------------------------
-def _pick_emp_id(emp: dict) -> int:
-    # UI/백엔드 필드가 섞여있을 수 있어서 안전하게
-    v = emp.get("employee_id", emp.get("emp_id", emp.get("id")))
-    return int(v) if v is not None else -1
+# --- DATA TABLE ---
+try:
+    with st.spinner("Syncing Global Registry..."):
+        employees = api_service.list_employees(query=search_q)
+        
+        # Apply Registry Status Filter
+        if status_filter == "Active Registry":
+            employees = [e for e in employees if e.get("has_face")]
+        elif status_filter == "Unregistered":
+            employees = [e for e in employees if not e.get("has_face")]
 
+    tables.render_employee_table(employees)
+except Exception as e:
+    st.error(f"Registry Synchronizer Error: {e}")
 
-def _has_face(emp: dict) -> bool:
-    # 백엔드 EmployeeResponse에 has_face가 있을 수 있음
-    if "has_face" in emp:
-        return bool(emp["has_face"])
-    # UI가 face_id 같은 걸 쓰면 그것도 감지
-    if emp.get("face_id") not in (None, "", 0):
-        return True
-    return False
+# --- MODALS: ADD PERSONNEL ---
+if st.session_state.get("show_add_modal"):
+    with st.container():
+        st.markdown('<div class="glass-card" style="border: 1px solid rgba(59, 130, 246, 0.3);">', unsafe_allow_html=True)
+        st.markdown("### ➕ Register New Personnel")
+        
+        c_fields1, c_fields2 = st.columns(2)
+        with c_fields1:
+            new_name = st.text_input("Full Display Name", placeholder="e.g. John Doe")
+            new_code = st.text_input("Personnel Code", placeholder="e.g. EMP-101")
+        with c_fields2:
+            new_role = st.selectbox("Designation", ["Worker", "Team Leader", "Manager"], index=0)
+            st.caption("Access level depends on role selection.")
 
-
-# ----------------------------
-# state
-# ----------------------------
-st.session_state.setdefault("pending_delete_emp", None)
-
-# ----------------------------
-# top actions
-# ----------------------------
-c1, c2 = st.columns([1, 3])
-with c1:
-    if st.button("➕ Add New Employee", use_container_width=True):
-        st.session_state["show_add_employee"] = True
-
-with c2:
-    query = st.text_input("Search by name or ID...", value="", placeholder="Search by name or ID...")
-
-
-# ----------------------------
-# add employee modal-ish
-# ----------------------------
-if st.session_state.get("show_add_employee"):
-    with st.container(border=True):
-        st.subheader("Create Employee")
-        n1, n2 = st.columns(2)
-        with n1:
-            new_name = st.text_input("Name", key="new_emp_name")
-        with n2:
-            new_code = st.text_input("Employee Code (optional)", key="new_emp_code")
-
-        a1, a2 = st.columns(2)
-        with a1:
-            if st.button("Create", type="primary", use_container_width=True):
+        st.markdown("---")
+        st.caption("Biometric Enrollment")
+        img_file = st.camera_input("Scanner Link active", label_visibility="collapsed")
+        
+        c_act1, c_act2 = st.columns(2)
+        if c_act1.button("Cancel Registry", use_container_width=True):
+            st.session_state.show_add_modal = False
+            st.rerun()
+            
+        if c_act2.button("Begin Enrollment", use_container_width=True, type="primary"):
+            if not new_name:
+                st.toast("Full Name is mandatory", icon="⚠️")
+            else:
                 try:
-                    if not new_name.strip():
-                        st.error("Name is required.")
-                    else:
-                        api_service.create_employee(new_name.strip(), new_code.strip() or None, api_base=api_base)
-                        st.success("Employee created.")
-                        st.session_state["show_add_employee"] = False
+                    with st.spinner("Encrypting and Syncing..."):
+                        # 1. Create Employee
+                        emp = api_service.create_employee(name=new_name, employee_code=new_code, role=new_role)
+                        eid = emp.get("employee_id")
+                        
+                        # 2. Enroll Face if image provided
+                        if img_file and eid:
+                            api_service.enroll_face(eid, img_file.getvalue())
+                        
+                        st.success(f"Successfully registered {new_name}")
+                        st.balloons()
+                        st.session_state.show_add_modal = False
                         st.rerun()
                 except Exception as e:
-                    st.error(f"Create failed: {e}")
-        with a2:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state["show_add_employee"] = False
-                st.rerun()
+                    st.error(f"Registry Error: {e}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-st.divider()
+# --- MODALS: MODIFY PERSONNEL ---
+if st.session_state.get("show_edit_modal") and st.session_state.get("employee_to_edit"):
+    emp = st.session_state.employee_to_edit
+    with st.container():
+        st.markdown('<div class="glass-card" style="border: 1px solid rgba(168, 85, 247, 0.3);">', unsafe_allow_html=True)
+        st.markdown(f"### 📝 Modify Record: {emp['name']}")
+        
+        c_e1, c_e2 = st.columns(2)
+        with c_e1:
+            edit_name = st.text_input("Full Name", value=emp["name"])
+            edit_code = st.text_input("Personnel Code", value=emp.get("employee_code") or "")
+        with c_e2:
+            current_role = emp.get("role", "Worker")
+            roles_list = ["Worker", "Team Leader", "Manager"]
+            role_idx = roles_list.index(current_role) if current_role in roles_list else 0
+            edit_role = st.selectbox("Update Designation", roles_list, index=role_idx)
 
-# ----------------------------
-# load employees
-# ----------------------------
-try:
-    employees = api_service.list_employees(query=query, limit=200, api_base=api_base)
-except Exception as e:
-    st.error(f"Data loading error: {e}")
-    employees = []
-
-# ----------------------------
-# render list + delete actions
-# ----------------------------
-# tables.render_employee_table(...) 같은 게 있다면 그걸 쓰고,
-# 없으면 여기서 간단히 그려줌.
-st.subheader("Employee List")
-
-if not employees:
-    st.info("No employees yet.")
-else:
-    # 테이블 출력(네가 쓰는 ui/tables.py에 맞춰서 유지)
-    # 기존 UI 테이블이 actions 컬럼을 내부에서 처리 못하면 아래 커스텀 리스트 방식이 더 안전함.
-    # 여기서는 '간단 리스트 + 버튼' 방식으로 확실히 동작하게 함.
-
-    for emp in employees:
-        emp_id = _pick_emp_id(emp)
-        name = emp.get("name", "")
-        code = emp.get("employee_code", "")
-
-        left, mid, right = st.columns([6, 3, 1])
-        with left:
-            st.write(f"**{name}**  \nEMP: `{code}`  | ID: `{emp_id}`")
-        with mid:
-            st.write("✅ Face" if _has_face(emp) else "❌ No Face")
-        with right:
-            if st.button("🗑️", key=f"del_{emp_id}", help="Delete employee"):
-                st.session_state["pending_delete_emp"] = {
-                    "employee_id": emp_id,
-                    "name": name,
-                }
-                st.rerun()
-
-# ----------------------------
-# confirm delete
-# ----------------------------
-pending = st.session_state.get("pending_delete_emp")
-if pending:
-    with st.container(border=True):
-        st.warning(f"Delete **{pending['name']}** (ID: {pending['employee_id']}) ?")
-        d1, d2 = st.columns(2)
-
-        with d1:
-            if st.button("Confirm Delete", type="primary", use_container_width=True):
-                try:
-                    emp_id = int(pending["employee_id"])
-
-                    # 1) face_embeddings 먼저 제거 (FK 안전)
-                    try:
-                        api_service.delete_face(emp_id, api_base=api_base)
-                    except Exception:
-                        # face 없으면 404 뜰 수 있으니 무시
-                        pass
-
-                    # 2) employee 제거
-                    api_service.delete_employee(emp_id, api_base=api_base)
-
-                    st.success("Deleted.")
-                    st.session_state["pending_delete_emp"] = None
+        c_edit_act1, c_edit_act2 = st.columns(2)
+        if c_edit_act1.button("Abort Changes", key="edit_cancel", use_container_width=True):
+            st.session_state.show_edit_modal = False
+            st.session_state.employee_to_edit = None
+            st.rerun()
+            
+        if c_edit_act2.button("Commit Updates", key="edit_save", use_container_width=True, type="primary"):
+            try:
+                with st.spinner("Updating Central DB..."):
+                    api_service.update_employee(emp["employee_id"], name=edit_name, employee_code=edit_code, role=edit_role)
+                    st.toast("Profile Synchronized", icon="✅")
+                    st.session_state.show_edit_modal = False
+                    st.session_state.employee_to_edit = None
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
+            except Exception as e:
+                st.error(f"Sync Failure: {e}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        with d2:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state["pending_delete_emp"] = None
-                st.rerun()
+# --- MODALS: DECOMMISSION PERSONNEL ---
+if st.session_state.get("show_delete_confirm") and st.session_state.get("employee_to_delete"):
+    emp = st.session_state.employee_to_delete
+    with st.container():
+        st.markdown('<div class="glass-card" style="border: 1px solid rgba(248, 113, 113, 0.3); background: rgba(248, 113, 113, 0.05);">', unsafe_allow_html=True)
+        st.markdown(f"### ⚠️ Decommission Personnel: {emp['name']}")
+        st.warning(f"Are you certain you want to remove this record? This action is irreversible and will purge all biometric hashes.")
+        
+        c_del_1, c_del_2 = st.columns(2)
+        if c_del_1.button("Cancel Purge", key="del_cancel", use_container_width=True):
+            st.session_state.show_delete_confirm = False
+            st.session_state.employee_to_delete = None
+            st.rerun()
+            
+        if c_del_2.button("Execute Decommission", key="del_confirm", use_container_width=True, type="primary"):
+            try:
+                with st.spinner("Purging data..."):
+                    api_service.delete_employee(emp["employee_id"])
+                    st.toast("Record Extinguished", icon="🗑️")
+                    st.session_state.show_delete_confirm = False
+                    st.session_state.employee_to_delete = None
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Purge Failed: {e}")
+        st.markdown('</div>', unsafe_allow_html=True)
