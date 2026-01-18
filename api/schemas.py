@@ -42,7 +42,7 @@ class FaceResponse(BaseModel):
     embedding_dim: int = 512
     model_name: Optional[str] = None
     model_version: Optional[str] = None
-    # embedding 컬럼(pgvector)은 너무 길어서 기본 응답에서는 제외 (필요하면 별도 옵션으로 조회)
+    # Embedding column (pgvector) is too long, excluded from default response (query separately if needed)
 
 
 # -----------------------------
@@ -65,7 +65,7 @@ class CameraResponse(BaseModel):
 
 # -----------------------------
 # attendance_logs
-# event_type는 DB에서 USER-DEFINED(enum)이라서 여기서는 str로 받음
+# event_type is USER-DEFINED (enum) in DB, so we accept it as str here
 # -----------------------------
 class AttendanceLogCreateRequest(BaseModel):
     event_time: Optional[str] = None  # timestamptz ISO string (optional)
@@ -93,6 +93,8 @@ class AttendanceLogResponse(BaseModel):
     recognized: bool
     similarity: Optional[float] = None
     employee_id: Optional[int] = None
+    name: Optional[str] = None
+    employee_code: Optional[str] = None
     created_at: str
 
 
