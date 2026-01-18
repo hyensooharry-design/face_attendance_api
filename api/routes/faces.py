@@ -1,83 +1,115 @@
-# api/routes/faces.py
 from __future__ import annotations
-
-from typing import Any, List, Optional
-
+from fastapi import APIRouter, UploadFile, File, HTTPException
 import numpy as np
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+import cv2
 
-from api.common import execute_or_500, get_data
-from api.embedding import get_embedding_from_image_bytes
 from api.supabase_client import get_supabase
+from api.models.face_models import detect_faces, get_embedding, safe_crop
 
 router = APIRouter(prefix="/faces", tags=["faces"])
 
 
-def vec_to_pgvector_str(v: np.ndarray) -> str:
-    v = v.astype(np.float32).tolist()
-    return "[" + ",".join(f"{x:.8f}" for x in v) + "]"
-
-
-@router.get("")
-def list_faces(limit: int = 200) -> List[Any]:
-    sb = get_supabase()
-    resp = execute_or_500(
-        lambda: sb.table("face_embeddings").select("employee_id,embedding_dim,model_name,model_version").limit(limit).execute(),
-        "list faces",
-    )
-    return get_data(resp)
-
-
-@router.get("/{employee_id}")
-def get_face(employee_id: int) -> Any:
-    sb = get_supabase()
-    resp = execute_or_500(
-        lambda: sb.table("face_embeddings").select("*").eq("employee_id", employee_id).maybe_single().execute(),
-        "get face",
-    )
-    rows = get_data(resp)
-    if not rows:
-        raise HTTPException(status_code=404, detail="Face not found")
-    return rows[0]
+def vec_to_pg(v: np.ndarray) -> str:
+    return "[" + ",".join(f"{x:.8f}" for x in v.tolist()) + "]"
 
 
 @router.post("/enroll/{employee_id}")
-async def enroll_face(
-    employee_id: int,
-    file: UploadFile = File(...),
-    model_name: Optional[str] = Form(default="arcface"),
-    model_version: Optional[str] = Form(default="onnx"),
-) -> Any:
-    img = await file.read()
-    if not img:
-        raise HTTPException(status_code=400, detail="Empty image")
+async def enroll_face(employee_id: int, file: UploadFile = File(...)):
+    img_bytes = await file.read()
+    frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
 
-    emb = get_embedding_from_image_bytes(img)
-    emb_str = vec_to_pgvector_str(emb)
+    if frame is None:
+        raise HTTPException(400, "Invalid image")
+
+    faces = detect_faces(frame)
+    if not faces:
+        raise HTTPException(400, "No face detected")
+
+    faces.sort(key=lambda b: (b[2]-b[0])*(b[3]-b[1]), reverse=True)
+    face = safe_crop(frame, faces[0])
+
+    emb = get_embedding(face)
+    emb = emb / np.linalg.norm(emb)
 
     sb = get_supabase()
-    payload = {
-        "employee_id": employee_id,
-        "embedding_dim": int(getattr(emb, "shape", [512])[0]) if hasattr(emb, "shape") else 512,
-        "model_name": model_name,
-        "model_version": model_version,
-        "embedding": emb_str,
-    }
 
-    execute_or_500(
-        lambda: sb.table("face_embeddings").upsert(payload, on_conflict="employee_id").execute(),
-        "enroll face (upsert face_embeddings)",
-    )
-    return {"ok": True, "employee_id": employee_id}
+    # 🔑 ENSURE PERSON EXISTS (employee_id is text in DB)
+    emp_id_str = str(employee_id)
+    p = sb.table("persons").select("id").eq("employee_id", emp_id_str).execute().data
+    if p:
+        person_id = p[0]["id"]
+    else:
+        # Fetch name from employees table
+        e = sb.table("employees").select("name").eq("employee_id", employee_id).execute().data
+        emp_name = e[0]["name"] if e else "Unknown"
+        
+        person = sb.table("persons").insert({
+            "employee_id": emp_id_str,
+            "name": emp_name
+        }).execute().data
+        person_id = person[0]["id"]
+
+    sb.table("face_embeddings").insert({
+        "person_id": person_id,
+        "embedding": vec_to_pg(emb),
+    }).execute()
+
+    # refresh cache
+    try:
+        from api.routes.recognize import refresh_embeddings
+        refresh_embeddings()
+    except Exception:
+        pass
+
+    return {"ok": True, "person_id": person_id}
+
+@router.post("/check-duplicate")
+async def check_duplicate(image: UploadFile = File(...)):
+    # Import KNOWN cache
+    from api.routes.recognize import KNOWN, refresh_embeddings
+    if not KNOWN:
+        refresh_embeddings()
+
+    img_bytes = await image.read()
+    frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        return {"duplicate": False}
+
+    faces = detect_faces(frame)
+    if not faces:
+        return {"duplicate": False}
+
+    faces.sort(key=lambda b: (b[2]-b[0])*(b[3]-b[1]), reverse=True)
+    face = safe_crop(frame, faces[0])
+    emb = get_embedding(face)
+    emb = emb / np.linalg.norm(emb)
+
+    for eid, data in KNOWN.items():
+        ref = data["vec"]
+        s = float(np.dot(emb, ref))
+        if s > 0.65: # High threshold for duplicates
+            return {
+                "duplicate": True, 
+                "employee_id": eid,
+                "name": data.get("name"),
+                "employee_code": data.get("code")
+            }
+
+    return {"duplicate": False}
 
 
 @router.delete("/{employee_id}")
-def delete_face(employee_id: int) -> Any:
+async def delete_face(employee_id: int):
     sb = get_supabase()
-    resp = execute_or_500(
-        lambda: sb.table("face_embeddings").delete().eq("employee_id", employee_id).execute(),
-        "delete face",
-    )
-    if not get_data(resp):
-        raise HTTPException(status_code=404, detail="Face not found or already deleted")
+    
+    # We delete from 'persons' (employee_id is text)
+    sb.table("persons").delete().eq("employee_id", str(employee_id)).execute()
+    
+    # refresh cache
+    try:
+        from api.routes.recognize import refresh_embeddings
+        refresh_embeddings()
+    except Exception:
+        pass
+        
     return {"ok": True}
