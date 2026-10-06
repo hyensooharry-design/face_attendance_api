@@ -1,83 +1,74 @@
-# api/routes/recognize.py
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
-import traceback
 import numpy as np
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from api.supabase_client import get_supabase
 from api.embedding import get_embedding_from_image_bytes
+from api.supabase_client import get_supabase
 
 router = APIRouter(tags=["recognize"])
 
-# ✅ DB enum(event_type)에 맞춰 강제 통일
 VALID_EVENT_TYPES = {"CHECK_IN", "CHECK_OUT"}
+DEBUG_ERRORS = os.getenv("DEBUG_ERRORS", "0").strip() == "1"
 
 
-# -----------------------------
-# Utilities
-# -----------------------------
 def _raise_if_error(resp: Any, msg: str) -> None:
-    """
-    supabase-py 응답에서 error가 있으면 FastAPI 예외로 변환.
-    (Render에서도 원인 파악 가능하도록 detail 풍부하게)
-    """
     err = getattr(resp, "error", None)
     if err:
         raise HTTPException(status_code=500, detail={"msg": msg, "error": repr(err)})
 
 
-def _normalize_event_type(v: str) -> str:
-    raw = (v or "").strip()
-    up = raw.upper()
-
-    # 흔한 변형 흡수
-    if up in {"CHECKIN", "CHECK-IN", "CHECK_IN"}:
-        up = "CHECK_IN"
-    elif up in {"CHECKOUT", "CHECK-OUT", "CHECK_OUT"}:
-        up = "CHECK_OUT"
-
-    if up not in VALID_EVENT_TYPES:
+def _normalize_event_type(value: str) -> str:
+    raw = (value or "").strip()
+    upper = raw.upper()
+    aliases = {
+        "CHECKIN": "CHECK_IN",
+        "CHECK-IN": "CHECK_IN",
+        "CHECK_IN": "CHECK_IN",
+        "CHECKOUT": "CHECK_OUT",
+        "CHECK-OUT": "CHECK_OUT",
+        "CHECK_OUT": "CHECK_OUT",
+    }
+    normalized = aliases.get(upper)
+    if normalized not in VALID_EVENT_TYPES:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid event_type: {raw!r}. Use one of {sorted(VALID_EVENT_TYPES)}",
         )
-    return up
+    return normalized
 
 
-def _parse_pgvector(v: Any) -> Optional[np.ndarray]:
-    """
-    face_embeddings.embedding 이 pgvector일 가능성이 높음.
-    supabase python client에서 문자열/리스트 등으로 올 수 있어 방어적으로 파싱.
-    """
-    if v is None:
+def _parse_pgvector(value: Any) -> Optional[np.ndarray]:
+    if value is None:
         return None
-
-    if isinstance(v, list):
+    if isinstance(value, list):
         try:
-            return np.asarray(v, dtype=np.float32)
+            return np.asarray(value, dtype=np.float32)
         except Exception:
             return None
-
-    if isinstance(v, str):
-        s = v.strip()
-        if s.startswith("[") and s.endswith("]"):
-            s = s[1:-1].strip()
-        if not s:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1].strip()
+        if not text:
             return None
         try:
-            arr = np.fromstring(s, sep=",", dtype=np.float32)
+            arr = np.fromstring(text, sep=",", dtype=np.float32)
             return arr if arr.size > 0 else None
         except Exception:
             return None
-
     return None
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=np.float32).reshape(-1)
+    b = np.asarray(b, dtype=np.float32).reshape(-1)
+    if a.shape != b.shape:
+        return -1.0
     denom = float(np.linalg.norm(a) * np.linalg.norm(b))
     if denom == 0:
         return -1.0
@@ -85,24 +76,13 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _ensure_camera_exists(camera_id: str) -> None:
-    """
-    attendance_logs.camera_id는 cameras.camera_id FK라서
-    camera가 없으면 log insert가 실패.
-    -> recognize에서 미리 upsert로 보장.
-    """
     sb = get_supabase()
-    # Render schema: cameras(camera_id TEXT PK, name TEXT, location TEXT, created_at TIMESTAMPTZ)
-    # -> Do not write columns that don't exist (e.g., is_active).
     resp = sb.table("cameras").upsert({"camera_id": camera_id}, on_conflict="camera_id").execute()
     _raise_if_error(resp, "Failed to ensure camera exists")
 
 
 def _fetch_all_embeddings(limit: int = 2000) -> List[Dict[str, Any]]:
     sb = get_supabase()
-    # Render schema:
-    #   face_embeddings(id, person_id, embedding, model_name, model_version, created_at)
-    #   persons(id, employee_id, ...)
-    # -> fetch person_id + embedding + linked employee_id via persons.
     resp = (
         sb.table("face_embeddings")
         .select("person_id, embedding, persons(employee_id)")
@@ -114,21 +94,13 @@ def _fetch_all_embeddings(limit: int = 2000) -> List[Dict[str, Any]]:
 
 
 def _extract_employee_id_from_row(row: Dict[str, Any]) -> Optional[int]:
-    """Extract employee_id from a face_embeddings row.
-
-    With PostgREST embedded relations, `persons(employee_id)` can come back as:
-    - a dict: {"employee_id": 1}
-    - a list: [{"employee_id": 1}] (depending on relationship cardinality)
-    """
     rel = row.get("persons")
-    if rel is None:
-        return None
     if isinstance(rel, dict):
-        v = rel.get("employee_id")
-        return int(v) if v is not None else None
+        value = rel.get("employee_id")
+        return int(value) if value is not None else None
     if isinstance(rel, list) and rel:
-        v = (rel[0] or {}).get("employee_id")
-        return int(v) if v is not None else None
+        value = (rel[0] or {}).get("employee_id")
+        return int(value) if value is not None else None
     return None
 
 
@@ -166,22 +138,18 @@ def _insert_attendance_log(
         "created_at": now,
     }
 
-    # ✅ postgrest.exceptions.APIError 같은 건 execute에서 "예외"로 터질 수 있음
     try:
         resp = sb.table("attendance_logs").insert(payload).execute()
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={"msg": "Failed to insert attendance log (exception)", "error": repr(e)},
-        )
+    except Exception as exc:
+        detail: Dict[str, Any] = {"msg": "Failed to insert attendance log"}
+        if DEBUG_ERRORS:
+            detail["error"] = repr(exc)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
     _raise_if_error(resp, "Failed to insert attendance log")
     return (resp.data or [{}])[0]
 
 
-# -----------------------------
-# Route
-# -----------------------------
 @router.post("/recognize")
 async def recognize(
     file: UploadFile = File(...),
@@ -189,104 +157,95 @@ async def recognize(
     camera_id: str = Form(...),
     threshold: float = Form(0.35),
 ) -> Dict[str, Any]:
+    event_type = _normalize_event_type(event_type)
+
+    camera_id = (camera_id or "").strip()
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="camera_id is required")
+
+    if not 0.0 <= float(threshold) <= 1.0:
+        raise HTTPException(status_code=400, detail="threshold must be between 0 and 1")
+
+    _ensure_camera_exists(camera_id)
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty file")
+
     try:
-        # ✅ 0) event_type normalize (DB enum 불일치 방지)
-        event_type = _normalize_event_type(event_type)
+        query_embedding = get_embedding_from_image_bytes(image_bytes).astype(np.float32)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        detail: Dict[str, Any] = {"msg": "Face embedding failed"}
+        if DEBUG_ERRORS:
+            detail["error"] = repr(exc)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
-        # 1) camera FK 보장
-        camera_id = (camera_id or "").strip()
-        if not camera_id:
-            raise HTTPException(status_code=400, detail="camera_id is required")
-        _ensure_camera_exists(camera_id)
-
-        # 2) 이미지 -> 임베딩
-        img_bytes = await file.read()
-        if not img_bytes:
-            raise HTTPException(status_code=400, detail="empty file")
-
-        try:
-            query_emb = get_embedding_from_image_bytes(img_bytes).astype(np.float32)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail={"msg": "embedding failed", "error": repr(e)})
-
-        # 3) DB 임베딩 fetch -> best match
-        rows = _fetch_all_embeddings(limit=2000)
-        if not rows:
-            log_row = _insert_attendance_log(
-                event_type=event_type,
-                camera_id=camera_id,
-                recognized=False,
-                similarity=None,
-                employee_id=None,
-            )
-            return {
-                "recognized": False,
-                "similarity": None,
-                "employee_id": None,
-                "name": None,
-                "employee_code": None,
-                "camera_id": camera_id,
-                "event_type": event_type,
-                "log_id": log_row.get("log_id"),
-                "event_time": log_row.get("event_time"),
-                "created_at": log_row.get("created_at"),
-                "message": "No enrolled faces found in DB.",
-            }
-
-        best_emp_id: Optional[int] = None
-        best_sim: float = -1.0
-
-        for r in rows:
-            emb = _parse_pgvector(r.get("embedding"))
-            if emb is None:
-                continue
-            if emb.shape[0] != query_emb.shape[0]:
-                continue
-            sim = _cosine_similarity(query_emb, emb)
-            if sim > best_sim:
-                best_sim = sim
-                best_emp_id = _extract_employee_id_from_row(r)
-
-        recognized = bool(best_emp_id is not None and best_sim >= float(threshold))
-
-        # 4) 직원 정보 + (원하면 비활성 제외)
-        emp_brief: Dict[str, Any] = {}
-        if recognized and best_emp_id is not None:
-            emp_brief = _fetch_employee_brief(int(best_emp_id))
-            if emp_brief.get("is_active") is False:
-                recognized = False
-
-        # 5) 로그 저장
+    rows = _fetch_all_embeddings(limit=2000)
+    if not rows:
         log_row = _insert_attendance_log(
             event_type=event_type,
             camera_id=camera_id,
-            recognized=recognized,
-            similarity=float(best_sim) if best_sim >= -0.5 else None,
-            employee_id=int(best_emp_id) if recognized and best_emp_id is not None else None,
+            recognized=False,
+            similarity=None,
+            employee_id=None,
         )
-
         return {
-            "recognized": recognized,
-            "similarity": float(best_sim) if best_sim >= -0.5 else None,
-            "employee_id": emp_brief.get("employee_id") if recognized else None,
-            "name": emp_brief.get("name") if recognized else None,
-            "employee_code": emp_brief.get("employee_code") if recognized else None,
+            "recognized": False,
+            "similarity": None,
+            "employee_id": None,
+            "name": None,
+            "employee_code": None,
             "camera_id": camera_id,
             "event_type": event_type,
             "log_id": log_row.get("log_id"),
             "event_time": log_row.get("event_time"),
             "created_at": log_row.get("created_at"),
+            "message": "No enrolled faces found in DB.",
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        tb = traceback.format_exc()
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "msg": "recognize crashed (unhandled exception)",
-                "error": repr(e),
-                "trace": tb[-2500:],
-            },
-        )
+    best_employee_id: Optional[int] = None
+    best_similarity = -1.0
+
+    for row in rows:
+        stored_embedding = _parse_pgvector(row.get("embedding"))
+        employee_id = _extract_employee_id_from_row(row)
+        if stored_embedding is None or employee_id is None:
+            continue
+
+        similarity = _cosine_similarity(query_embedding, stored_embedding)
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_employee_id = employee_id
+
+    recognized = bool(
+        best_employee_id is not None and best_similarity >= float(threshold)
+    )
+
+    employee: Dict[str, Any] = {}
+    if recognized and best_employee_id is not None:
+        employee = _fetch_employee_brief(best_employee_id)
+        if employee.get("is_active") is False:
+            recognized = False
+
+    log_row = _insert_attendance_log(
+        event_type=event_type,
+        camera_id=camera_id,
+        recognized=recognized,
+        similarity=float(best_similarity) if best_similarity >= -0.5 else None,
+        employee_id=best_employee_id if recognized else None,
+    )
+
+    return {
+        "recognized": recognized,
+        "similarity": float(best_similarity) if best_similarity >= -0.5 else None,
+        "employee_id": employee.get("employee_id") if recognized else None,
+        "name": employee.get("name") if recognized else None,
+        "employee_code": employee.get("employee_code") if recognized else None,
+        "camera_id": camera_id,
+        "event_type": event_type,
+        "log_id": log_row.get("log_id"),
+        "event_time": log_row.get("event_time"),
+        "created_at": log_row.get("created_at"),
+    }

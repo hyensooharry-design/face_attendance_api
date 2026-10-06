@@ -1,12 +1,16 @@
 __pycache__/
-*.pyc
+*.py[cod]
 .env
+.env.*
+!.env.example
 .venv/
-api/models/ai/*.onnx
+venv/
+.pytest_cache/
+.mypy_cache/
+.streamlit/secrets.toml
+models/
+api/models/ai/
 *.onnx
-
-# Large model artifacts
-api/models.zip
-api/models/**
-*.onnx
-
+*.zip
+.DS_Store
+Thumbs.db

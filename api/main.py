@@ -1,35 +1,47 @@
-# api/main.py
 from __future__ import annotations
 
 import os
 import traceback
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Any, Dict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-import traceback
-
 from api.model_assets import ensure_models
-from api.routes import employees, faces, logs, cameras, recognize, schedules
+from api.routes import cameras, employees, faces, logs, recognize, schedules
 
 load_dotenv()
 
-app = FastAPI(title="Face Attendance API")
+app = FastAPI(
+    title="Face Attendance API",
+    version="1.0.0",
+    description="Face-recognition attendance API backed by Supabase.",
+)
 
-# ---- CORS
+DEBUG_ERRORS = os.getenv("DEBUG_ERRORS", "0").strip() == "1"
+DUMMY_MODE = os.getenv("DUMMY_MODE", "0").strip() == "1"
+AUTO_DOWNLOAD_MODELS = os.getenv("AUTO_DOWNLOAD_MODELS", "1").strip() == "1"
+
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:8501,http://127.0.0.1:8501,http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # prod에서는 제한 권장
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---- Routers
 app.include_router(employees.router)
 app.include_router(faces.router)
 app.include_router(logs.router)
@@ -37,58 +49,55 @@ app.include_router(cameras.router)
 app.include_router(recognize.router)
 app.include_router(schedules.router)
 
-# ---- Debug flag
-DEBUG_ERRORS = os.getenv("DEBUG_ERRORS", "0").strip() == "1"
-
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    # 운영에서는 trace 노출 위험. DEBUG_ERRORS=1 일 때만 반환.
+    content: Dict[str, Any] = {
+        "detail": "Internal Server Error",
+        "path": str(request.url.path),
+    }
     if DEBUG_ERRORS:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "msg": "unhandled exception",
-                "error": repr(exc),
-                "path": str(request.url),
-                "trace": traceback.format_exc()[-2500:],
-            },
-        )
-    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+        content["error"] = repr(exc)
+        content["trace"] = traceback.format_exc()[-2500:]
+    return JSONResponse(status_code=500, content=content)
 
 
 @app.get("/")
 def root() -> Dict[str, Any]:
-    return {"ok": True, "service": "face-attendance-api"}
+    return {
+        "ok": True,
+        "service": "face-attendance-api",
+        "version": app.version,
+        "dummy_mode": DUMMY_MODE,
+    }
 
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "ts": datetime.now(timezone.utc).isoformat()}
+    return {
+        "ok": True,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "dummy_mode": DUMMY_MODE,
+    }
 
 
 @app.get("/__version")
-def __version() -> Dict[str, Any]:
-    # Render가 어떤 커밋을 돌리는지 확인용
+def version_info() -> Dict[str, Any]:
     return {
+        "app_version": app.version,
         "render_git_commit": os.getenv("RENDER_GIT_COMMIT"),
         "render_service_id": os.getenv("RENDER_SERVICE_ID"),
     }
 
 
 @app.on_event("startup")
-def _startup():
-    # 모델 파일 확보 (다운로드/캐시)
-    ensure_models()
+def startup() -> None:
+    if DUMMY_MODE:
+        print("[startup] DUMMY_MODE=1: skipping model download.")
+        return
 
-@app.exception_handler(Exception)
-async def all_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={
-            "msg": "unhandled server error",
-            "error": repr(exc),
-            "trace": traceback.format_exc()[-2500:],
-            "path": str(request.url),
-        },
-    )
+    if not AUTO_DOWNLOAD_MODELS:
+        print("[startup] AUTO_DOWNLOAD_MODELS=0: model download disabled.")
+        return
+
+    ensure_models()

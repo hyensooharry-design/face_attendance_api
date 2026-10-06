@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DUMMY_MODE: "1"
+      AUTO_DOWNLOAD_MODELS: "0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Compile Python sources
+        run: |
+          python -m compileall -q api pages scripts styles ui
+          python -m py_compile 01_Timekeeping.py api_client.py
+
+      - name: Run tests
+        run: pytest -q

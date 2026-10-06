@@ -5,10 +5,10 @@ python-dotenv==1.0.1
 numpy==1.26.4
 pillow==10.2.0
 opencv-python-headless==4.9.0.80
-torch==2.1.2
-torchvision==0.16.2
-facenet-pytorch==2.5.3
+onnxruntime>=1.18,<2
 supabase==2.27.0
+postgrest>=0.16
 requests==2.31.0
-onnxruntime
-postgrest
+pandas>=2.2,<3
+streamlit>=1.39,<2
+streamlit-webrtc>=0.47,<1

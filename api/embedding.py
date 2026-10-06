@@ -1,147 +1,91 @@
 from __future__ import annotations
 
+import hashlib
 import os
-from typing import Optional, Tuple
 
-import numpy as np
 import cv2
+import numpy as np
 
-# -----------------------------------------------------------------------------
-# Optional model imports (graceful fallback when models/ is missing)
-# -----------------------------------------------------------------------------
-_MODEL_AVAILABLE = True
-try:
-    from api.models.face_models import load_retinaface, load_arcface  # type: ignore
-except Exception:
-    _MODEL_AVAILABLE = False
-    load_retinaface = None  # type: ignore
-    load_arcface = None  # type: ignore
+from api.models.face_models import load_arcface, load_face_detector
 
-# If models are missing, enable dummy mode by default (can be overridden)
-# - DUMMY_MODE=1 : always dummy (even if models exist)
-# - DUMMY_MODE=0 : force real (will crash if models missing)
-_env_dummy = os.getenv("DUMMY_MODE", "").strip()
-if _env_dummy == "":
-    # default behavior: dummy if models missing
-    DUMMY_MODE = not _MODEL_AVAILABLE
-else:
-    DUMMY_MODE = _env_dummy == "1"
+DUMMY_MODE = os.getenv("DUMMY_MODE", "0").strip() == "1"
 
-
-# Lazy-loaded models
-_RETINA = None
+_DETECTOR = None
 _ARCFACE = None
 
 
 def _ensure_models() -> None:
-    """
-    Load models lazily. If dummy mode, skip.
-    """
-    global _RETINA, _ARCFACE
-
+    global _DETECTOR, _ARCFACE
     if DUMMY_MODE:
         return
 
-    if not _MODEL_AVAILABLE:
-        raise RuntimeError(
-            "Model modules not available (models/face_models.py missing). "
-            "Set DUMMY_MODE=1 to run without models."
-        )
-
-    if _RETINA is None:
-        _RETINA = load_retinaface()  # type: ignore
+    if _DETECTOR is None:
+        _DETECTOR = load_face_detector()
     if _ARCFACE is None:
-        _ARCFACE = load_arcface()  # type: ignore
+        device = os.getenv("FACE_DEVICE", "cpu").strip().lower() or "cpu"
+        _ARCFACE = load_arcface(device=device)
 
 
 def _decode_image(image_bytes: bytes) -> np.ndarray:
     arr = np.frombuffer(image_bytes, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
+    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if image is None:
         raise ValueError("Failed to decode image bytes.")
-    return img
+    return image
 
 
-def _crop_face(img_bgr: np.ndarray) -> np.ndarray:
-    """
-    Detect face using RetinaFace and crop the most confident face.
-    """
+def _largest_face_crop(image_bgr: np.ndarray) -> np.ndarray:
     _ensure_models()
-
-    # If dummy mode, just return center crop-ish region to avoid crashing.
-    if DUMMY_MODE:
-        h, w = img_bgr.shape[:2]
-        y1 = max(0, int(h * 0.15))
-        y2 = min(h, int(h * 0.85))
-        x1 = max(0, int(w * 0.15))
-        x2 = min(w, int(w * 0.85))
-        face = img_bgr[y1:y2, x1:x2]
-        if face.size == 0:
-            raise ValueError("Invalid dummy crop.")
-        return face
-
-    bboxes, landmarks = _RETINA.detect(img_bgr)  # type: ignore
-    if bboxes is None or len(bboxes) == 0:
+    boxes = _DETECTOR.detect(image_bgr)
+    if not boxes:
         raise ValueError("No face detected.")
 
-    best = max(bboxes, key=lambda x: float(x[4]) if len(x) > 4 else 0.0)
-    x1, y1, x2, y2 = [int(v) for v in best[:4]]
+    x, y, w, h = max(boxes, key=lambda box: box[2] * box[3])
 
-    h, w = img_bgr.shape[:2]
-    x1 = max(0, min(w - 1, x1))
-    x2 = max(0, min(w - 1, x2))
-    y1 = max(0, min(h - 1, y1))
-    y2 = max(0, min(h - 1, y2))
+    # Add a small margin so the recognition model receives the whole face.
+    margin_x = int(w * 0.15)
+    margin_y = int(h * 0.15)
+    x1 = max(0, x - margin_x)
+    y1 = max(0, y - margin_y)
+    x2 = min(image_bgr.shape[1], x + w + margin_x)
+    y2 = min(image_bgr.shape[0], y + h + margin_y)
 
-    if x2 <= x1 or y2 <= y1:
-        raise ValueError("Invalid face bbox.")
-
-    face = img_bgr[y1:y2, x1:x2]
-    return face
-
-
-def _preprocess_for_arcface(face_bgr: np.ndarray) -> np.ndarray:
-    """
-    ArcFace commonly expects 112x112 RGB, normalized.
-    """
-    face = cv2.resize(face_bgr, (112, 112))
-    face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-    face_rgb = face_rgb.astype(np.float32) / 255.0
-    return face_rgb
+    crop = image_bgr[y1:y2, x1:x2]
+    if crop.size == 0:
+        raise ValueError("Detected face crop is empty.")
+    return crop
 
 
-def _dummy_embedding(seed: int = 42, dim: int = 512) -> np.ndarray:
-    """
-    Deterministic dummy embedding for pipeline testing.
-    """
-    rng = np.random.default_rng(seed=seed)
-    return rng.random(dim, dtype=np.float32)
+def _dummy_embedding(image_bytes: bytes, dim: int = 512) -> np.ndarray:
+    """Deterministic test embedding derived from image content."""
+    digest = hashlib.sha256(image_bytes).digest()
+    seed = int.from_bytes(digest[:8], "big", signed=False)
+    rng = np.random.default_rng(seed)
+    embedding = rng.standard_normal(dim).astype(np.float32)
+    norm = float(np.linalg.norm(embedding))
+    return embedding / norm if norm > 0 else embedding
 
 
 def get_embedding_from_image_bytes(image_bytes: bytes) -> np.ndarray:
-    """
-    Decode image -> detect+crop face -> ArcFace embedding
-    If models are missing (dummy mode), returns a deterministic 512-dim vector.
-    """
+    if not image_bytes:
+        raise ValueError("Empty image bytes.")
+
     if DUMMY_MODE:
-        # You can change seed based on image content for variation if you want.
-        return _dummy_embedding(seed=42, dim=512)
+        return _dummy_embedding(image_bytes)
 
     _ensure_models()
-    img = _decode_image(image_bytes)
-    face = _crop_face(img)
-    x = _preprocess_for_arcface(face)
-
-    emb = _ARCFACE.get_embedding(x)  # type: ignore
-    if emb is None:
-        raise ValueError("Failed to get embedding.")
-    emb = np.asarray(emb, dtype=np.float32).reshape(-1)
-    return emb
+    image = _decode_image(image_bytes)
+    face = _largest_face_crop(image)
+    return _ARCFACE.get_embedding(face)
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    a = a.astype(np.float32)
-    b = b.astype(np.float32)
-    a = a / (np.linalg.norm(a) + 1e-9)
-    b = b / (np.linalg.norm(b) + 1e-9)
-    return float(np.dot(a, b))
+    a = np.asarray(a, dtype=np.float32).reshape(-1)
+    b = np.asarray(b, dtype=np.float32).reshape(-1)
+    if a.shape != b.shape:
+        raise ValueError(f"Embedding shape mismatch: {a.shape} vs {b.shape}")
+
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0:
+        return -1.0
+    return float(np.dot(a, b) / denom)

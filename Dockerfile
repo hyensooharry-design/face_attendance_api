@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# OpenCV/torch 계열에서 종종 필요한 시스템 패키지
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgl1 \
@@ -9,15 +8,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# requirements 먼저 복사(캐시 활용)
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 나머지 소스 복사
 COPY . /app
 
-# 기본 포트
+ENV MODELS_DIR=/app/models/ai
+ENV AUTO_DOWNLOAD_MODELS=1
+
 EXPOSE 8000
 
-# (기존 Dockerfile 맨 아래)
-CMD ["bash", "-lc", "python scripts/fetch_models.py && uvicorn api.main:app --host 0.0.0.0 --port 8000"]
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
